@@ -25,9 +25,21 @@ import signal
 import sys
 import time
 
+import agregador
 import config
 import recolector
 import senales
+from analizadores import base as analizador_base
+from analizadores import resumen as an_resumen
+from analizadores import sistema as an_sistema
+
+# Registro de analizadores implementados: dimension -> (modulo, por_pid).
+# Los que faltan (memoria, fds, threads, senales, scheduling) se agregan acá
+# y el resto del cableado no cambia.
+ANALIZADORES = {
+    "resumen": (an_resumen.extraer, True),
+    "sistema": (an_sistema.extraer, False),
+}
 
 # Cuánto se espera en cada escalón del shutdown, en segundos.
 ESPERA_COOPERATIVA = 2.0   # a que los hijos vean el Event y salgan solos
@@ -67,6 +79,15 @@ class Monitor:
         # round-trip por socket.
         self.verbose = mp.Value("b", 1 if self.cfg["verbose"] else 0)
 
+        # Una Queue POR analizador, no una compartida. Con un solo escritor
+        # por cola, el patrón "descartar la más vieja" de base.py no tiene
+        # race condition: no hay dos procesos que puedan encontrarla llena a
+        # la vez, sacar dos y meter dos.
+        self.colas = {
+            nombre: mp.Queue(maxsize=self.cfg["cola_maxsize"])
+            for nombre in config.DIMENSIONES
+        }
+
         self.canal = senales.CanalSenales()
 
     # ----------------------------------------------------------------------
@@ -97,7 +118,24 @@ class Monitor:
             (self.snapshot, self.intervalos["recolector"], self.parar),
         )
 
-        # TODO: los 7 analizadores, el agregador y el display.
+        # Un proceso por analizador implementado. Todos corren el mismo loop
+        # (base.correr); lo único que cambia es la función `extraer`.
+        for nombre, (extraer, por_pid) in ANALIZADORES.items():
+            self.lanzar(
+                f"an_{nombre}",
+                analizador_base.correr,
+                (nombre, extraer, self.snapshot, self.colas[nombre],
+                 self.intervalos[nombre], self.parar, por_pid),
+            )
+
+        # El agregador recibe TODAS las colas: es el único consumidor.
+        self.lanzar(
+            "agregador",
+            agregador.correr,
+            (self.snapshot, list(self.colas.values()), self.parar),
+        )
+
+        # TODO: el display (TUI) y los 5 analizadores restantes.
 
         return fd
 
@@ -255,14 +293,23 @@ class Monitor:
 
     def imprimir_debug(self):
         pids = self.snapshot.get("pids", [])
-        ts = self.snapshot.get("pids_ts", 0)
-        edad = time.time() - ts if ts else -1
-        print(
-            f"    snapshot: {len(pids)} pids, "
-            f"antigüedad {edad:.1f}s, "
-            f"claves={sorted(self.snapshot.keys())}",
-            flush=True,
-        )
+        der = self.snapshot.get("derivados", {})
+        sis = self.snapshot.get("sistema", {})
+        cpu = sis.get("cpu_pct", {})
+        mem = sis.get("mem", {})
+
+        print(f"    pids={len(pids)}  procesos={der.get('procesos_totales','-')}"
+              f"  threads={der.get('threads_totales','-')}"
+              f"  zombies={der.get('zombies','-')}"
+              f"  estados={der.get('por_estado', {})}", flush=True)
+        if cpu:
+            print(f"    CPU global: uso={cpu.get('uso')}%  user={cpu.get('user')}%"
+                  f"  sys={cpu.get('system')}%  idle={cpu.get('idle')}%"
+                  f"  |  RAM {mem.get('usada_kb',0)//1024}/"
+                  f"{mem.get('total_kb',0)//1024} MB", flush=True)
+        for p in der.get("top_cpu", [])[:3]:
+            print(f"      top cpu: {p['pid']:>7} {p['comm'][:24]:<24} {p['cpu']:>6}%",
+                  flush=True)
 
 
 def main():
