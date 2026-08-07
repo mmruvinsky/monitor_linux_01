@@ -54,6 +54,9 @@ class Agregador:
         self.prev_procesos_ts = None
         # Muestra anterior de los jiffies globales de /proc/stat
         self.prev_cpu_global = None
+        # Muestra anterior de threads: {(pid, tid): jiffies}
+        self.prev_threads = {}
+        self.prev_threads_ts = None
         # %CPU calculado por PID, para poder derivar el top 3 y para que la
         # vista Threads lo reutilice.
         self.cpu_por_pid = {}
@@ -69,6 +72,8 @@ class Agregador:
             self.procesar_resumen(muestra)
         elif dimension == "sistema":
             self.procesar_sistema(muestra)
+        elif dimension == "threads":
+            self.procesar_threads(muestra)
         else:
             # Las demás dimensiones no necesitan derivados: pasan tal cual.
             self.escribir(dimension, muestra["datos"], muestra["ts"])
@@ -172,6 +177,47 @@ class Agregador:
             "top_cpu": top("cpu"),
             "top_rss": top("rss_kb"),
         }
+
+    # ------------------------------------------------------------------
+    # Threads: %CPU por LWP, mismo delta pero con clave (pid, tid)
+    # ------------------------------------------------------------------
+
+    def procesar_threads(self, muestra):
+        ahora = muestra["ts"]
+        dt = (ahora - self.prev_threads_ts) if self.prev_threads_ts else 0.0
+
+        nuevo_prev = {}
+        salida = {}
+
+        for pid, info in muestra["datos"].items():
+            hilos = []
+            for t in info.get("threads", []):
+                clave = (pid, t["tid"])
+                jiffies = t.get("jiffies", 0)
+                cpu = 0.0
+                anterior = self.prev_threads.get(clave)
+                if anterior is not None and dt > 0:
+                    delta = jiffies - anterior
+                    if delta >= 0:
+                        cpu = 100.0 * (delta / self.hz) / dt
+                fila = dict(t)
+                fila["cpu"] = round(cpu, 1)
+                hilos.append(fila)
+                nuevo_prev[clave] = jiffies
+
+            copia = dict(info)
+            copia["threads"] = hilos
+            # Suma del CPU de los threads. Debería aproximar el CPU% del
+            # proceso entero: un proceso multithread puede pasar de 100%
+            # porque sus threads corren en cores distintos.
+            copia["cpu_total"] = round(sum(h["cpu"] for h in hilos), 1)
+            salida[pid] = copia
+
+        # Igual que con los procesos: los threads que ya no están se
+        # descartan, o el dict crecería sin límite.
+        self.prev_threads = nuevo_prev
+        self.prev_threads_ts = ahora
+        self.escribir("threads", salida, ahora)
 
     # ------------------------------------------------------------------
     # Sistema: %CPU global, también por delta

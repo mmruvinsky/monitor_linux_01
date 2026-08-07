@@ -30,14 +30,24 @@ import config
 import recolector
 import senales
 from analizadores import base as analizador_base
+from analizadores import fds as an_fds
+from analizadores import memoria as an_memoria
 from analizadores import resumen as an_resumen
+from analizadores import scheduling as an_scheduling
+from analizadores import senales as an_senales
 from analizadores import sistema as an_sistema
+from analizadores import threads as an_threads
 
-# Registro de analizadores implementados: dimension -> (modulo, por_pid).
-# Los que faltan (memoria, fds, threads, senales, scheduling) se agregan acá
-# y el resto del cableado no cambia.
+# Registro de los 7 analizadores: dimension -> (funcion extraer, por_pid).
+# por_pid=False es solo para 'sistema', que lee archivos globales y no itera
+# sobre procesos.
 ANALIZADORES = {
     "resumen": (an_resumen.extraer, True),
+    "memoria": (an_memoria.extraer, True),
+    "fds": (an_fds.extraer, True),
+    "threads": (an_threads.extraer, True),
+    "senales": (an_senales.extraer, True),
+    "scheduling": (an_scheduling.extraer, True),
     "sistema": (an_sistema.extraer, False),
 }
 
@@ -135,7 +145,7 @@ class Monitor:
             (self.snapshot, list(self.colas.values()), self.parar),
         )
 
-        # TODO: el display (TUI) y los 5 analizadores restantes.
+        # TODO: el display (TUI).
 
         return fd
 
@@ -310,6 +320,14 @@ class Monitor:
         for p in der.get("top_cpu", [])[:3]:
             print(f"      top cpu: {p['pid']:>7} {p['comm'][:24]:<24} {p['cpu']:>6}%",
                   flush=True)
+
+        # Antigüedad de cada dimensión: así se ve si un analizador se murió.
+        ahora = time.time()
+        edades = []
+        for d in config.DIMENSIONES:
+            ts = self.snapshot.get(f"{d}_ts")
+            edades.append(f"{d}={ahora - ts:.0f}s" if ts else f"{d}=-")
+        print("      edades: " + "  ".join(edades), flush=True)
 
 
 def main():
