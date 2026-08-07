@@ -1,0 +1,27 @@
+{
+  "intervalos": {
+    "recolector": 1.0,
+    "resumen": 2.0,
+    "memoria": 3.0,
+    "fds": 5.0,
+    "threads": 2.0,
+    "senales": 10.0,
+    "scheduling": 10.0,
+    "sistema": 2.0
+  },
+  "intervalos_minimos": {
+    "resumen": 0.5,
+    "memoria": 1.0,
+    "fds": 2.0,
+    "threads": 0.5,
+    "senales": 5.0,
+    "scheduling": 5.0,
+    "sistema": 1.0
+  },
+  "cola_maxsize": 4,
+  "vista_inicial": "resumen",
+  "filtro_comando": "",
+  "filtro_usuario": "",
+  "orden": "cpu",
+  "verbose": false
+}
