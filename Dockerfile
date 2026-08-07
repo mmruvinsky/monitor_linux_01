@@ -15,6 +15,17 @@ ENV PYTHONUNBUFFERED=1 \
 
 WORKDIR /app
 
+# procps trae ps, pgrep y kill como binarios. No los necesita el monitor
+# —todo lo lee de /proc por su cuenta— pero sirven para DOS cosas:
+#   1. mandarle señales al monitor desde `docker compose exec`
+#   2. contrastar la salida del monitor contra ps dentro del mismo
+#      contenedor, que es la forma de verificar que los datos son correctos
+# La imagen slim no los trae porque 'kill' es un builtin del shell y 'exec'
+# no pasa por shell.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends procps \
+    && rm -rf /var/lib/apt/lists/*
+
 # Las dependencias van en una capa aparte y ANTES del código: así, cuando
 # cambiás un .py, Docker reusa la capa cacheada del pip install en vez de
 # reinstalar todo en cada build.
