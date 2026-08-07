@@ -15,9 +15,11 @@ Documento de referencia: qué archivo hace qué, y cómo se comunican en runtime
 ```
 monitor_linux_01/
 ├── config.json                 config inicial: intervalos, filtros default
+├── Makefile                    atajos (make run / test / debug / clean)
 ├── Dockerfile
 ├── docker-compose.yml
 ├── requirements.txt
+├── requirements-dev.txt
 ├── README.md                   informe (entregable evaluado)
 ├── dudas.md
 ├── docs/

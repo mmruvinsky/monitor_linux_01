@@ -801,9 +801,34 @@ bloquearse en varias a la vez.
 
 ## 7. Cómo correr y testear
 
+### 7.0 Atajos
+
+```bash
+make          # lista los comandos disponibles
+make run      # el monitor en Docker, con teclado
+make test     # los 51 tests
+make debug    # sin TUI, imprimiendo el snapshot
+make clean    # borra dumps y __pycache__
+```
+
+| target | qué hace |
+|---|---|
+| `run` | `docker compose run --rm --build monitor` — **la forma recomendada** |
+| `up` | `docker compose up --build`, avisando antes que el teclado no va a andar |
+| `local` | `python3 src/main.py`, sin Docker |
+| `debug` | sin TUI, snapshot por stdout |
+| `test` | los tests en un contenedor descartable |
+| `capturas` | regenera los SVG de `docs/img/` |
+| `build` / `down` / `clean` | construir, bajar, limpiar |
+
+El `Makefile` existe sobre todo por el problema que se explica abajo: el
+comando correcto para una TUI en Docker es largo y fácil de olvidar.
+
 ### 7.1 Con Docker (forma recomendada)
 
 ```bash
+make run
+# equivale a:
 docker compose run --rm --build monitor
 ```
 
