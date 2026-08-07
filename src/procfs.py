@@ -116,7 +116,7 @@ def leer_status(pid, tid=None):
     un dict {campo: valor} con los valores SIN convertir (todos str).
 
     Formato real:
-        Name:\thead
+        Name:\tthread
         State:\tR (running)
         PPid:\t11726
         Uid:\t1000\t1000\t1000\t1000
@@ -161,6 +161,7 @@ def leer_status(pid, tid=None):
 # Verificado contra man 5 proc. Cuidado: la consigna dice que SID y PGID son
 # los campos 6-7, pero según el man son 5 (pgrp) y 6 (session). Confiar en el
 # man y verificarlo con `ps -o pid,pgid,sid`.
+
 STAT_PID = 1
 STAT_COMM = 2
 STAT_STATE = 3
@@ -356,3 +357,493 @@ def tamano_pagina():
     campos de /proc están en páginas y no en kB.
     """
     return os.sysconf("SC_PAGE_SIZE")
+
+
+# ---------------------------------------------------------------------------
+# /proc/<pid>/fd/  — file descriptors
+# ---------------------------------------------------------------------------
+
+def clasificar_fd(destino):
+    """
+    Infiere el tipo de un FD a partir del destino de su symlink.
+
+    Linux representa TODO como archivo, pero el destino del link te dice qué
+    es realmente. Formatos que devuelve el kernel:
+
+        /dev/pts/3          -> tty      (terminal)
+        socket:[95130]      -> socket   (el número es el inode del socket)
+        pipe:[12345]        -> pipe     (pipe anónimo, ej: el de un `cmd | cmd`)
+        anon_inode:[eventfd]-> anon     (eventfd, epoll, timerfd, signalfd...)
+        /dev/null           -> dev
+        /home/user/x.log    -> file     (archivo regular en disco)
+        /memfd:foo (deleted)-> memfd    (memoria anónima con nombre, mmap)
+
+    Los tres primeros son los que importan para la materia: 'pipe:' es
+    literalmente lo de clase 5, y 'socket:' te deja ver qué procesos hablan
+    por red o por unix sockets sin usar la red vos.
+    """
+    if destino is None:
+        return "?"
+    if destino.startswith("socket:"):
+        return "socket"
+    if destino.startswith("pipe:"):
+        return "pipe"
+    if destino.startswith("anon_inode:"):
+        return "anon"
+    if destino.startswith("/memfd:"):
+        return "memfd"
+    if destino.startswith("/dev/pts/") or destino == "/dev/tty":
+        return "tty"
+    if destino.startswith("/dev/"):
+        return "dev"
+    return "file"
+
+
+# Los tres FDs que todo proceso hereda de su padre (clase 5).
+FDS_ESTANDAR = {0: "stdin", 1: "stdout", 2: "stderr"}
+
+
+def listar_fds(pid):
+    """
+    Devuelve [{'fd': int, 'destino': str, 'tipo': str, 'estandar': str|None}]
+    ordenado por número de FD, o None si no se puede leer el directorio.
+
+    Por qué os.readlink() y no os.path.realpath():
+    /proc/<pid>/fd/N es un symlink MÁGICO. No apunta a una ruta del filesystem
+    en el sentido normal: el kernel lo genera describiendo el objeto abierto.
+    Por eso puede "apuntar" a cosas que no son archivos, como 'socket:[95130]',
+    que no existe en ningún directorio. realpath() intentaría resolverlo y
+    fallaría; readlink() devuelve el texto crudo, que es lo que queremos.
+
+    Permisos: este directorio es modo 0500 y pertenece al dueño del proceso.
+    Solo podés listarlo si sos ese usuario o root. Con procesos ajenos vas a
+    recibir None constantemente, y eso NO es un bug — es aislamiento del
+    kernel. Verificalo:  ls -l /proc/1/fd/   (falla salvo que seas root)
+
+    Race condition inherente: entre listdir() y readlink() el proceso puede
+    haber cerrado el FD. Por eso el readlink va dentro de su propio try.
+    """
+    carpeta = f"{PROC}/{pid}/fd"
+    try:
+        nombres = os.listdir(carpeta)
+    except (FileNotFoundError, PermissionError, ProcessLookupError, OSError):
+        return None
+
+    fds = []
+    for nombre in nombres:
+        if not nombre.isdigit():
+            continue
+        numero = int(nombre)
+        try:
+            destino = os.readlink(f"{carpeta}/{nombre}")
+        except OSError:
+            continue  # se cerró entre el listdir y el readlink
+        fds.append({
+            "fd": numero,
+            "destino": destino,
+            "tipo": clasificar_fd(destino),
+            "estandar": FDS_ESTANDAR.get(numero),
+        })
+    fds.sort(key=lambda d: d["fd"])
+    return fds
+
+
+# ---------------------------------------------------------------------------
+# /proc/<pid>/maps  — mapa de memoria virtual
+# ---------------------------------------------------------------------------
+
+def leer_maps(pid):
+    """
+    Parsea /proc/<pid>/maps y devuelve la lista de regiones:
+        [{'inicio', 'fin', 'tam_kb', 'perms', 'offset', 'dev', 'inode', 'ruta'}]
+
+    Formato de cada línea (el último campo puede faltar):
+
+        5bf9c4e25000-5bf9c4e2c000 r-xp 00002000 fc:01 15352654 /usr/bin/head
+        └──── rango ─────────────┘ └──┘ └─offset┘ └dev┘ └inode┘ └── ruta ──┘
+
+    Los permisos son 4 caracteres: r/w/x y el cuarto es 'p' (private) o
+    's' (shared). Ese cuarto es el que revela Copy-on-Write: una región 'p'
+    mapeada desde un archivo se copia recién cuando la escribís.
+
+    Se usa split(maxsplit=5) porque la RUTA PUEDE CONTENER ESPACIOS
+    (ej: /home/user/mi carpeta/lib.so). Mismo tipo de trampa que el comm.
+    """
+    texto = leer_texto(f"{PROC}/{pid}/maps")
+    if texto is None:
+        return None
+
+    regiones = []
+    for linea in texto.splitlines():
+        partes = linea.split(maxsplit=5)
+        if len(partes) < 5:
+            continue
+        rango, perms, offset, dev, inode = partes[:5]
+        ruta = partes[5].strip() if len(partes) > 5 else ""
+        if "-" not in rango:
+            continue
+        ini_txt, fin_txt = rango.split("-", 1)
+        try:
+            inicio, fin = int(ini_txt, 16), int(fin_txt, 16)
+        except ValueError:
+            continue
+        regiones.append({
+            "inicio": inicio,
+            "fin": fin,
+            "tam_kb": (fin - inicio) // 1024,
+            "perms": perms,
+            "offset": offset,
+            "dev": dev,
+            "inode": inode,
+            "ruta": ruta,
+        })
+    return regiones
+
+
+def agrupar_segmentos(regiones):
+    """
+    Agrupa las regiones de maps en los segmentos clásicos de la teoría
+    (clase 3: text / data / BSS / heap / stack) y devuelve
+    {segmento: {'kb': int, 'regiones': int}}.
+
+    Cómo se clasifica cada región, y por qué:
+
+    - '[heap]'  -> heap    : el kernel lo etiqueta explícitamente. Crece con
+                             brk()/sbrk(). Acá vive lo que pedís con malloc.
+    - '[stack]' -> stack   : también etiquetado. Crece hacia abajo.
+    - '[vdso]', '[vsyscall]', '[vvar]' -> kernel : páginas que el kernel mapea
+                             en todo proceso para acelerar syscalls como
+                             gettimeofday() sin cambiar a modo kernel.
+    - perms[3] == 's' -> shared : memoria compartida (mmap MAP_SHARED). ACÁ es
+                             donde van a aparecer tus propios Value/Array
+                             cuando corras el monitor. Es literalmente clase 7.
+    - 'r-x' con ruta -> text : código ejecutable del binario o de una .so.
+                             Read + execute, NO write: por eso el binario se
+                             puede compartir entre procesos sin copiarlo (COW).
+    - 'r--' con ruta -> rodata : constantes, strings literales.
+    - 'rw-' con ruta -> data : variables globales inicializadas.
+    - 'rw-' sin ruta -> anon : mapeos anónimos. Acá cae el BSS (globales sin
+                             inicializar) y lo que pide malloc para bloques
+                             grandes (glibc usa mmap en vez de brk arriba de
+                             cierto tamaño). Por eso NO se puede separar BSS
+                             de heap-por-mmap mirando solo maps: son
+                             indistinguibles desde afuera. (Limitación conocida.)
+    """
+    grupos = {}
+
+    def sumar(clave, kb):
+        g = grupos.setdefault(clave, {"kb": 0, "regiones": 0})
+        g["kb"] += kb
+        g["regiones"] += 1
+
+    for r in regiones or []:
+        ruta, perms, kb = r["ruta"], r["perms"], r["tam_kb"]
+
+        if ruta == "[heap]":
+            sumar("heap", kb)
+        elif ruta == "[stack]" or ruta.startswith("[stack:"):
+            sumar("stack", kb)
+        elif ruta in ("[vdso]", "[vsyscall]", "[vvar]"):
+            sumar("kernel", kb)
+        elif len(perms) > 3 and perms[3] == "s":
+            sumar("shared", kb)
+        elif "x" in perms and ruta:
+            sumar("text", kb)
+        elif ruta and perms.startswith("r--"):
+            sumar("rodata", kb)
+        elif ruta and "w" in perms:
+            sumar("data", kb)
+        elif ruta:
+            sumar("otros_file", kb)
+        else:
+            sumar("anon", kb)
+
+    return grupos
+
+
+# ---------------------------------------------------------------------------
+# Estadísticas globales del sistema
+# ---------------------------------------------------------------------------
+
+# Columnas de la línea 'cpu' de /proc/stat, en orden. Todas en jiffies
+# acumulados desde el boot.
+COLUMNAS_CPU = [
+    "user",       # tiempo en modo usuario
+    "nice",       # modo usuario con nice > 0
+    "system",     # modo kernel
+    "idle",       # sin hacer nada
+    "iowait",     # idle pero esperando I/O (poco confiable, ver nota abajo)
+    "irq",        # atendiendo interrupciones de hardware
+    "softirq",    # atendiendo interrupciones de software
+    "steal",      # tiempo robado por el hypervisor (solo en VMs)
+    "guest",      # corriendo una VM invitada
+    "guest_nice",
+]
+
+
+def leer_stat_global():
+    """
+    Parsea /proc/stat y devuelve:
+        {'cpu': {user, nice, system, ...},          # agregado de todos los cores
+         'cpus': {'cpu0': {...}, 'cpu1': {...}},    # por core
+         'btime': int,          # timestamp Unix del boot
+         'processes': int,      # procesos creados desde el boot (acumulado)
+         'procs_running': int,  # tasks en estado R AHORA MISMO
+         'procs_blocked': int}  # tasks en estado D (I/O ininterrumpible) AHORA
+
+    Igual que utime/stime de un proceso, los valores de 'cpu' son JIFFIES
+    ACUMULADOS DESDE EL BOOT. Para sacar el %CPU del sistema hay que hacer
+    delta entre dos lecturas:
+
+        %uso = (total₂-total₁ - (idle₂-idle₁)) / (total₂-total₁) × 100
+
+    donde total = suma de todas las columnas.
+
+    Nota sobre 'iowait': el propio kernel documenta que este valor no es
+    confiable en máquinas multi-core, porque un core puede quedar idle y
+    contabilizar iowait de un I/O que en realidad está esperando otro core.
+    Mostralo, pero no lo uses para decidir nada.
+
+    Ojo con 'processes': es un CONTADOR ACUMULADO de forks desde el boot
+    (15558 en este sistema), NO la cantidad de procesos vivos. Para eso hay
+    que contar las carpetas con listar_pids().
+    """
+    texto = leer_texto(f"{PROC}/stat")
+    if texto is None:
+        return None
+
+    datos = {"cpu": {}, "cpus": {}}
+    for linea in texto.splitlines():
+        partes = linea.split()
+        if not partes:
+            continue
+        clave = partes[0]
+
+        if clave == "cpu" or (clave.startswith("cpu") and clave[3:].isdigit()):
+            valores = {}
+            for nombre, txt in zip(COLUMNAS_CPU, partes[1:]):
+                try:
+                    valores[nombre] = int(txt)
+                except ValueError:
+                    valores[nombre] = 0
+            if clave == "cpu":
+                datos["cpu"] = valores
+            else:
+                datos["cpus"][clave] = valores
+
+        elif clave in ("btime", "processes", "procs_running", "procs_blocked",
+                       "ctxt", "intr"):
+            try:
+                datos[clave] = int(partes[1])
+            except (IndexError, ValueError):
+                pass
+
+    return datos
+
+
+def total_jiffies(cpu):
+    """Suma de todas las columnas de una línea de CPU. Denominador del %."""
+    return sum(cpu.values()) if cpu else 0
+
+
+def porcentaje_cpu_global(antes, ahora):
+    """
+    Calcula el % de uso de CPU entre dos lecturas de leer_stat_global()['cpu'].
+    Devuelve {'user': %, 'system': %, 'idle': %, 'iowait': %, 'uso': %}.
+
+    Esta es LA función que demuestra por qué el agregador debe ser un proceso
+    con memoria propia: necesita 'antes' y 'ahora'. Un Manager solo guarda
+    'ahora'.
+
+    Devuelve todo en 0 si el delta es 0 (dos lecturas demasiado juntas, o
+    reloj sin avanzar). Nunca divide por cero.
+    """
+    if not antes or not ahora:
+        return {}
+    delta_total = total_jiffies(ahora) - total_jiffies(antes)
+    if delta_total <= 0:
+        return {}
+
+    resultado = {}
+    for col in ("user", "nice", "system", "idle", "iowait", "irq", "softirq", "steal"):
+        delta = ahora.get(col, 0) - antes.get(col, 0)
+        resultado[col] = round(100.0 * delta / delta_total, 1)
+    resultado["uso"] = round(100.0 - resultado.get("idle", 0.0), 1)
+    return resultado
+
+
+def leer_meminfo():
+    """
+    Parsea /proc/meminfo y devuelve {campo: kilobytes(int)}.
+
+    Formato:  'MemTotal:       15505860 kB'
+    Casi todos los valores están en kB, salvo HugePages_* que son conteos.
+    Se descarta la unidad y se guarda el número.
+
+    Campos que importan para la vista Sistema:
+      MemTotal, MemFree, MemAvailable, Buffers, Cached, SwapTotal, SwapFree
+
+    Trampa clásica: 'memoria usada' NO es MemTotal - MemFree. Eso te va a dar
+    un número altísimo y falso, porque el kernel usa toda la RAM libre como
+    cache de disco (Cached/Buffers) y la libera al instante si alguien la
+    necesita. Lo correcto es MemTotal - MemAvailable, que es el número que el
+    propio kernel calcula teniendo en cuenta qué cache es reclamable.
+    Compará los dos y vas a ver la diferencia.
+    """
+    texto = leer_texto(f"{PROC}/meminfo")
+    if texto is None:
+        return None
+
+    datos = {}
+    for linea in texto.splitlines():
+        if ":" not in linea:
+            continue
+        clave, valor = linea.split(":", 1)
+        partes = valor.split()
+        if not partes:
+            continue
+        try:
+            datos[clave.strip()] = int(partes[0])
+        except ValueError:
+            continue
+    return datos
+
+
+def memoria_usada_kb(meminfo):
+    """
+    Memoria realmente usada, en kB. Ver la nota de leer_meminfo() sobre por
+    qué se usa MemAvailable y no MemFree.
+    """
+    if not meminfo:
+        return 0
+    total = meminfo.get("MemTotal", 0)
+    disponible = meminfo.get("MemAvailable")
+    if disponible is None:
+        # Kernels < 3.14 no tienen MemAvailable; aproximación clásica.
+        disponible = (meminfo.get("MemFree", 0)
+                      + meminfo.get("Buffers", 0)
+                      + meminfo.get("Cached", 0))
+    return max(0, total - disponible)
+
+
+def leer_loadavg():
+    """
+    Parsea /proc/loadavg:  '0.90 1.37 1.23 1/2130 15549'
+
+    Devuelve {'1min','5min','15min','ejecutables','total_tasks','ultimo_pid'}.
+
+    Qué es el load average, porque casi todo el mundo lo entiende mal: NO es
+    "% de CPU". Es el promedio móvil de la cantidad de tasks en estado
+    R (ejecutando/listo) MÁS los que están en D (I/O ininterrumpible).
+
+    Por eso, en una máquina de 16 cores un load de 8 es media máquina, pero en
+    una de 4 cores el mismo 8 significa que hay el doble de trabajo que
+    capacidad. Siempre hay que compararlo contra os.cpu_count().
+
+    Y por eso también un load alto puede venir de disco saturado (tasks en D)
+    sin que la CPU esté ocupada en absoluto.
+
+    El campo '1/2130' es ejecutables/total de tasks (no de procesos: cuenta
+    threads). El último número es el PID asignado más recientemente.
+    """
+    texto = leer_texto(f"{PROC}/loadavg")
+    if texto is None:
+        return None
+    partes = texto.split()
+    if len(partes) < 5:
+        return None
+    try:
+        ejecutables, total = partes[3].split("/")
+        return {
+            "1min": float(partes[0]),
+            "5min": float(partes[1]),
+            "15min": float(partes[2]),
+            "ejecutables": int(ejecutables),
+            "total_tasks": int(total),
+            "ultimo_pid": int(partes[4]),
+            "cpus": os.cpu_count() or 1,
+        }
+    except (ValueError, IndexError):
+        return None
+
+
+def leer_uptime():
+    """
+    Parsea /proc/uptime: '4074.70 46363.88'
+      - primer número: segundos desde el boot
+      - segundo: suma del tiempo idle de TODOS los cores
+
+    Por eso el segundo puede ser mayor que el primero: en 4074 s de uptime,
+    16 cores acumulan hasta 65184 s de idle sumados. Si dividís
+    idle/uptime/cpus tenés la fracción de máquina ociosa desde el boot.
+    """
+    texto = leer_texto(f"{PROC}/uptime")
+    if texto is None:
+        return None
+    partes = texto.split()
+    try:
+        return {"uptime_s": float(partes[0]), "idle_s": float(partes[1])}
+    except (ValueError, IndexError):
+        return None
+
+
+# ---------------------------------------------------------------------------
+# UID -> nombre de usuario
+# ---------------------------------------------------------------------------
+
+_cache_usuarios = {}
+
+
+def usuario_de_uid(uid):
+    """
+    Traduce un UID numérico a nombre de usuario.
+
+    Se cachea porque /proc/<pid>/status te da el UID en cada lectura, y
+    resolverlo para 400 procesos cada 2 segundos significaría releer
+    /etc/passwd 400 veces por ciclo. Los UIDs no cambian de nombre en runtime,
+    así que cachear es seguro.
+
+    Si el UID no existe en /etc/passwd (típico dentro de un contenedor, donde
+    el usuario del host no está en el passwd de la imagen) se devuelve el
+    número como string. No es un error: es normal en Docker.
+    """
+    try:
+        uid = int(uid)
+    except (TypeError, ValueError):
+        return "?"
+    if uid in _cache_usuarios:
+        return _cache_usuarios[uid]
+    try:
+        import pwd
+        nombre = pwd.getpwuid(uid).pw_name
+    except (KeyError, ImportError, OSError):
+        nombre = str(uid)
+    _cache_usuarios[uid] = nombre
+    return nombre
+
+
+def uid_de_status(status):
+    """
+    Extrae el UID REAL de un dict de leer_status().
+
+    El campo viene con CUATRO valores: 'Uid:  1000  1000  1000  1000'
+    que son, en orden:
+        real       - quién lanzó el proceso
+        efectivo   - con qué permisos actúa AHORA (cambia con setuid)
+        saved      - el efectivo guardado, para poder volver
+        filesystem - el que se usa para chequear permisos de archivos (Linux)
+
+    Un binario setuid como 'passwd' tiene real=1000 pero efectivo=0. Por eso
+    importa cuál mostrás: el real dice quién lo lanzó, el efectivo dice qué
+    puede hacer. Acá devolvemos el real, que es lo que muestra `ps -u`.
+    """
+    if not status:
+        return None
+    campo = status.get("Uid", "")
+    partes = campo.split()
+    if not partes:
+        return None
+    try:
+        return int(partes[0])
+    except ValueError:
+        return None
