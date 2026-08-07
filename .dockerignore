@@ -1,0 +1,9 @@
+.git/
+__pycache__/
+*.pyc
+docs/
+tests/
+dump_*.json
+monitor.log
+*.md
+.gitignore

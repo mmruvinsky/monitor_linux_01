@@ -1,0 +1,89 @@
+services:
+
+  # =========================================================================
+  # Servicio principal: el monitor viendo TODOS los procesos del host.
+  #   docker compose up --build
+  # =========================================================================
+  monitor:
+    build: .
+    container_name: monitor_linux_01
+    image: monitor_linux_01:latest
+
+    # ---------------------------------------------------------------------
+    # pid: "host"  ← LA LÍNEA MÁS IMPORTANTE DE ESTE ARCHIVO
+    # ---------------------------------------------------------------------
+    # Por defecto, un contenedor tiene su PROPIO PID NAMESPACE: es un
+    # espacio de numeración de PIDs separado del host. Adentro, el primer
+    # proceso del contenedor es el PID 1 y /proc solo muestra los procesos
+    # de ese namespace.
+    #
+    # Sin esta línea, el monitor vería ~13 procesos (los suyos) en vez de los
+    # ~460 del sistema, y el TP no tendría sentido: es un monitor DEL SISTEMA.
+    #
+    # Con pid: "host" el contenedor comparte el PID namespace del host, así
+    # que /proc muestra todos los procesos reales de la máquina. El
+    # aislamiento de red y de filesystem se mantiene: solo se comparte la
+    # numeración de procesos.
+    #
+    # Probá la diferencia vos mismo con el perfil 'aislado' de abajo.
+    pid: "host"
+
+    # ---------------------------------------------------------------------
+    # tty + stdin_open: obligatorios para la TUI (los pide la consigna).
+    # ---------------------------------------------------------------------
+    # tty: true       -> asigna una pseudo-terminal. Sin esto, rich detecta
+    #                    que no hay tty y dibuja texto plano sin colores, y
+    #                    termios.tcgetattr() del teclado falla.
+    # stdin_open: true -> equivale a docker run -i: mantiene stdin abierto
+    #                    para que el thread de teclado pueda leer teclas.
+    tty: true
+    stdin_open: true
+
+    # ---------------------------------------------------------------------
+    # init: false  ← también deliberado
+    # ---------------------------------------------------------------------
+    # Docker puede insertar 'tini' como PID 1 para cosechar zombies. Acá NO
+    # hace falta y además taparía el punto pedagógico del TP: nuestro main.py
+    # ya cosecha a sus hijos con join(). Si dejáramos que tini lo hiciera,
+    # no se podría demostrar el manejo de zombies.
+    #
+    # (Con pid: "host" el proceso ni siquiera es PID 1 de ningún namespace,
+    #  así que no aplican las reglas especiales de señales del PID 1.)
+    init: false
+
+    environment:
+      # Se propaga el TERM del host para que rich use los colores correctos.
+      - TERM=${TERM:-xterm-256color}
+
+    volumes:
+      # config.json montado desde el host: así se puede editar afuera y
+      # recargar en caliente con SIGHUP sin reconstruir la imagen.
+      - ./config.json:/app/config.json:ro
+      # /etc/passwd del host en solo lectura: sin esto, la imagen slim no
+      # conoce los usuarios del host y la columna USUARIO mostraría UIDs
+      # numéricos en vez de nombres.
+      - /etc/passwd:/etc/passwd:ro
+
+    # Para que Ctrl+C llegue rápido y no espere los 10 s de gracia de Docker
+    # (nuestro shutdown ordenado tarda ~1 s).
+    stop_grace_period: 10s
+
+  # =========================================================================
+  # Servicio de comparación: el MISMO monitor, pero con el PID namespace
+  # aislado (el default de Docker). Sirve para ver en vivo qué hace un PID
+  # namespace.
+  #
+  #   docker compose --profile demo up --build monitor-aislado
+  #
+  # Vas a ver un puñado de procesos en vez de cientos, y el monitor va a
+  # aparecer con PID 1: dentro de su namespace, ÉL es el init.
+  # =========================================================================
+  monitor-aislado:
+    build: .
+    container_name: monitor_linux_01_aislado
+    image: monitor_linux_01:latest
+    profiles: ["demo"]
+    tty: true
+    stdin_open: true
+    environment:
+      - TERM=${TERM:-xterm-256color}
