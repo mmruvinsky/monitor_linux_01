@@ -77,6 +77,8 @@ class Display:
         self.buffer_entrada = ""
         self.mensaje = ""
         self.filas = []               # última lista renderizada
+        self.diag_teclado = "?"       # de dónde salió el fd del teclado
+        self.teclas_recibidas = 0     # contador, para diagnosticar
 
     # ==================================================================
     # Entrada de teclado
@@ -236,6 +238,7 @@ class Display:
             self.vista, self.seleccion, self.pin, self.orden,
             self.filtro_cmd, self.filtro_usr, self.mostrar_ayuda,
             self.modo_entrada, self.buffer_entrada, self.mensaje,
+            self.teclas_recibidas,
         )
 
     def render(self, alto=46):
@@ -659,10 +662,14 @@ class Display:
             if self.verbose is not None and self.verbose.value:
                 filtros.append("[bold yellow]VERBOSE[/]")
             extra = ("   " + "  ".join(filtros)) if filtros else ""
+            teclado_ok = self.teclas_recibidas > 0
+            estado_teclado = (
+                f"[green]teclado ok ({self.teclas_recibidas})[/]" if teclado_ok
+                else f"[yellow]teclado: {self.diag_teclado}[/]")
             cuerpo = Text.from_markup(
                 "".join(tabs) + extra
                 + f"\n[dim]↑↓ navegar · Enter pin · / cmd · u user · c orden · "
-                  f"+/- intervalo · h ayuda · q salir[/]"
+                  f"+/- intervalo · h ayuda · q salir[/]  " + estado_teclado
                 + (f"   [green]{self.mensaje}[/]" if self.mensaje else ""))
         return Panel(cuerpo, border_style="blue", padding=(0, 1))
 
@@ -699,7 +706,7 @@ class Display:
             border_style="cyan")
 
 
-def correr(snapshot, intervalos, verbose, parar, cfg):
+def correr(snapshot, intervalos, verbose, parar, cfg, fd_tty=None):
     """Punto de entrada del proceso display."""
     senales.preparar_hijo()
     ui = Display(snapshot, intervalos, verbose, parar, cfg)
@@ -716,10 +723,12 @@ def correr(snapshot, intervalos, verbose, parar, cfg):
     #                   DOS repintados compitiendo sobre la misma pantalla y
     #                   se ve el parpadeo. Con auto_refresh=False el único que
     #                   dibuja es este loop, cuando decide que hace falta.
-    with Teclado() as teclado, Live(ui.render(consola.size.height),
-                                   console=consola, screen=True,
-                                   auto_refresh=False,
-                                   transient=False) as live:
+    with Teclado(fd_heredado=fd_tty) as teclado, \
+            Live(ui.render(consola.size.height), console=consola, screen=True,
+                 auto_refresh=False, transient=False) as live:
+        # Queda visible en el pie: si dice "no hay terminal disponible", el
+        # teclado no va a responder y se sabe por qué.
+        ui.diag_teclado = teclado.diagnostico
         firma_anterior = None
         ultimo_pintado = 0.0
 
@@ -729,6 +738,7 @@ def correr(snapshot, intervalos, verbose, parar, cfg):
                 ui.mostrar_ayuda = False
                 teclas = teclas[1:]
             for tecla in teclas:
+                ui.teclas_recibidas += 1
                 ui.procesar(tecla)
 
             ahora = time.monotonic()

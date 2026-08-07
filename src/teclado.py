@@ -64,12 +64,21 @@ class Teclado:
     consume sin bloquearse.
     """
 
-    def __init__(self):
+    def __init__(self, fd_heredado=None):
+        """
+        fd_heredado: descriptor de la terminal que el proceso PADRE duplicó
+        con os.dup(0) antes de forkear. Es la vía más confiable, porque no
+        depende de que /dev/tty sea accesible ni de qué le hizo
+        multiprocessing a sys.stdin.
+        """
         self.cola = queue.Queue()
         self._parar = threading.Event()
         self._hilo = None
         self._fd = None
+        self._propio = False        # ¿el fd lo abrimos nosotros?
         self._settings = None
+        self._fd_heredado = fd_heredado
+        self.diagnostico = "sin inicializar"
 
     def __enter__(self):
         self.iniciar()
@@ -105,11 +114,23 @@ class Teclado:
         proceso: existe independientemente de qué le hayan hecho a los fds
         estándar, y sobrevive al fork.
         """
-        # 1. La terminal de control. Es el camino normal.
+        # 1. El fd que el padre duplicó antes del fork. Es el más confiable.
+        if self._fd_heredado is not None:
+            try:
+                if os.isatty(self._fd_heredado):
+                    self.diagnostico = f"fd heredado del padre ({self._fd_heredado})"
+                    return self._fd_heredado
+            except OSError:
+                pass
+
+        # 2. La terminal de control del proceso.
         try:
-            return os.open("/dev/tty", os.O_RDONLY | os.O_NOCTTY)
-        except OSError:
-            pass
+            fd = os.open("/dev/tty", os.O_RDONLY | os.O_NOCTTY)
+            self._propio = True
+            self.diagnostico = "/dev/tty"
+            return fd
+        except OSError as e:
+            self.diagnostico = f"/dev/tty falló ({e.strerror})"
         # 2. Fallback: el DESCRIPTOR 0 crudo, no sys.stdin.
         #    _close_stdin() reemplaza el objeto sys.stdin por uno nuevo que
         #    apunta a /dev/null, pero el fd 0 del proceso puede seguir siendo
@@ -118,9 +139,14 @@ class Teclado:
         #    hacía que el teclado no respondiera.
         try:
             if os.isatty(0):
+                self._propio = True
+                self.diagnostico = "dup del fd 0"
                 return os.dup(0)
         except OSError:
             pass
+        self.diagnostico = (self.diagnostico + " y el fd 0 no es una tty"
+                            if "falló" in self.diagnostico
+                            else "no hay terminal disponible")
         return None
 
     def iniciar(self):
@@ -154,11 +180,12 @@ class Teclado:
                 termios.tcsetattr(self._fd, termios.TCSADRAIN, self._settings)
             except (termios.error, ValueError, OSError):
                 pass
-        # El fd es nuestro (lo abrimos con open o dup), así que lo cerramos.
-        try:
-            os.close(self._fd)
-        except OSError:
-            pass
+        # Solo se cierra si lo abrimos nosotros. El fd heredado es del padre.
+        if self._propio:
+            try:
+                os.close(self._fd)
+            except OSError:
+                pass
         self._fd = None
 
     def _loop(self):

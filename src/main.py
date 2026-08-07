@@ -150,11 +150,24 @@ class Monitor:
         # la primera pantalla no aparece vacía. En modo --debug no se lanza,
         # porque los dos escribirían sobre la misma terminal.
         if not self.debug:
+            # Se duplica el fd de la terminal ACÁ, en el padre, antes del
+            # fork. multiprocessing cierra sys.stdin en cada hijo
+            # (util._close_stdin) y lo reapunta a /dev/null, así que el
+            # display no puede confiar en sys.stdin para leer el teclado.
+            # Un fd duplicado sobrevive al fork y sigue apuntando a la
+            # terminal real.
+            try:
+                fd_tty = os.dup(0) if os.isatty(0) else None
+            except OSError:
+                fd_tty = None
+            self.log(f"fd de terminal para el display: {fd_tty} "
+                     f"(isatty(0)={os.isatty(0)})")
+
             self.lanzar(
                 "display",
                 display.correr,
                 (self.snapshot, self.intervalos, self.verbose, self.parar,
-                 self.cfg),
+                 self.cfg, fd_tty),
             )
 
         return fd
