@@ -27,6 +27,7 @@ import time
 
 import agregador
 import config
+import display
 import recolector
 import senales
 from analizadores import base as analizador_base
@@ -145,7 +146,16 @@ class Monitor:
             (self.snapshot, list(self.colas.values()), self.parar),
         )
 
-        # TODO: el display (TUI).
+        # El display se lanza último: los demás ya están produciendo, así que
+        # la primera pantalla no aparece vacía. En modo --debug no se lanza,
+        # porque los dos escribirían sobre la misma terminal.
+        if not self.debug:
+            self.lanzar(
+                "display",
+                display.correr,
+                (self.snapshot, self.intervalos, self.verbose, self.parar,
+                 self.cfg),
+            )
 
         return fd
 
@@ -155,7 +165,10 @@ class Monitor:
 
     def loop(self):
         ultimo_debug = 0.0
-        while self.corriendo:
+        # parar.is_set() además de self.corriendo: cuando el usuario aprieta
+        # 'q', el display setea el Event directamente y el padre se tiene que
+        # enterar sin que haya llegado ninguna señal.
+        while self.corriendo and not self.parar.is_set():
             # esperar() se bloquea en select() sobre el self-pipe. El timeout
             # hace que despertemos igual cada 0.5 s para vigilar a los hijos.
             for signum in self.canal.esperar(timeout=0.5):
@@ -299,7 +312,20 @@ class Monitor:
     # ----------------------------------------------------------------------
 
     def log(self, mensaje):
-        print(f"[{time.strftime('%H:%M:%S')}] {mensaje}", flush=True)
+        """
+        En modo normal la TUI es dueña de la terminal, así que imprimir acá
+        rompería el dibujo. Los mensajes van a monitor.log; en --debug (sin
+        TUI) van a stdout.
+        """
+        linea = f"[{time.strftime('%H:%M:%S')}] {mensaje}"
+        if self.debug:
+            print(linea, flush=True)
+            return
+        try:
+            with open("monitor.log", "a", encoding="utf-8") as f:
+                f.write(linea + "\n")
+        except OSError:
+            pass
 
     def imprimir_debug(self):
         pids = self.snapshot.get("pids", [])
