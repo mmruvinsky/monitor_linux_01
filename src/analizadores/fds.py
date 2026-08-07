@@ -15,15 +15,20 @@ ajenos, procfs.listar_fds() devuelve None y esa entrada queda marcada como
 
 import procfs
 
-# Cuántos FDs se guardan por proceso en modo normal. Sin este tope, un proceso
-# con 4000 FDs abiertos haría que el snapshot pese megabytes y que cada
-# round-trip del Manager (pickle + socket) se vuelva lento. En modo verbose
-# (SIGUSR2) la TUI puede pedir más.
+# Cuántos FDs se guardan por proceso. Sin tope, un proceso con 4000 FDs
+# abiertos haría que el snapshot pese megabytes y que cada round-trip del
+# Manager (pickle + socket) se vuelva lento.
+#
+# El modo verbose (SIGUSR2) sube el tope: es exactamente lo que pide la
+# consigna con "más detalle en cada proceso, ej: más FDs visibles". Se paga
+# con un snapshot más pesado, por eso no es el default.
 TOPE_NORMAL = 32
+TOPE_VERBOSE = 256
 
 
-def extraer(pid):
+def extraer(pid, verbose=False):
     """FDs de un proceso, o None si murió."""
+    tope = TOPE_VERBOSE if verbose else TOPE_NORMAL
     lista = procfs.listar_fds(pid)
 
     if lista is None:
@@ -42,8 +47,9 @@ def extraer(pid):
         "pid": pid,
         "sin_permiso": False,
         "total": len(lista),
-        "truncado": len(lista) > TOPE_NORMAL,
-        "fds": lista[:TOPE_NORMAL],
+        "truncado": len(lista) > tope,
+        "verbose": verbose,
+        "fds": lista[:tope],
         # Conteo por tipo: sirve para la vista resumida y no depende del tope.
         # 'pipe' y 'socket' son los interesantes para la materia: un pipe es
         # literalmente lo de clase 5, y el número entre corchetes es el inode

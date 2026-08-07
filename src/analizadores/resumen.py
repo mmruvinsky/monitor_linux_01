@@ -35,7 +35,7 @@ ESTADOS = {
 }
 
 
-def extraer(pid):
+def extraer(pid, verbose=False):
     """
     Devuelve el resumen de un proceso, o None si murió / no se puede leer.
 

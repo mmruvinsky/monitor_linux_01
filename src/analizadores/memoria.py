@@ -29,7 +29,7 @@ CAMPOS_VM = {
 }
 
 
-def extraer(pid):
+def extraer(pid, verbose=False):
     """Datos de memoria de un proceso, o None si murió."""
     status = procfs.leer_status(pid)
     if status is None:

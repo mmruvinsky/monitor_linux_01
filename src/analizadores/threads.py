@@ -25,17 +25,20 @@ import procfs
 
 # Tope de threads guardados por proceso. Un navegador puede tener 300+ y el
 # snapshot viaja entero por el socket del Manager en cada actualización.
+# El modo verbose (SIGUSR2) lo sube, igual que en fds.py.
 TOPE_THREADS = 64
+TOPE_VERBOSE = 512
 
 
-def extraer(pid):
+def extraer(pid, verbose=False):
     """Threads de un proceso, o None si murió."""
+    tope = TOPE_VERBOSE if verbose else TOPE_THREADS
     tids = procfs.listar_tids(pid)
     if not tids:
         return None
 
     threads = []
-    for tid in sorted(tids)[:TOPE_THREADS]:
+    for tid in sorted(tids)[:tope]:
         campos = procfs.leer_stat(pid, tid=tid)
         if campos is None:
             continue  # el thread terminó entre el listdir y la lectura
@@ -66,7 +69,8 @@ def extraer(pid):
     return {
         "pid": pid,
         "total": len(tids),
-        "truncado": len(tids) > TOPE_THREADS,
+        "truncado": len(tids) > tope,
+        "verbose": verbose,
         "threads": threads,
     }
 

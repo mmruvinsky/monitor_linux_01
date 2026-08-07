@@ -623,6 +623,10 @@ class Display:
                 filtros.append(f"cmd~[bold]{self.filtro_cmd}[/]")
             if self.filtro_usr:
                 filtros.append(f"user~[bold]{self.filtro_usr}[/]")
+            # El estado de verbose se lee del Value compartido, no de una
+            # variable local: lo cambia el PADRE al recibir SIGUSR2, no la TUI.
+            if self.verbose is not None and self.verbose.value:
+                filtros.append("[bold yellow]VERBOSE[/]")
             extra = ("   " + "  ".join(filtros)) if filtros else ""
             cuerpo = Text.from_markup(
                 "".join(tabs) + extra

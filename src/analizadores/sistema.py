@@ -13,7 +13,7 @@ del sistema también necesita dos lecturas, y también lo calcula el agregador.
 import procfs
 
 
-def extraer():
+def extraer(verbose=False):
     """
     Devuelve el estado global del sistema, o {} si /proc no responde.
     No recibe pid: base.correr() lo llama sin argumentos.

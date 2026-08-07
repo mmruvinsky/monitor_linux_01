@@ -27,7 +27,7 @@ POLITICAS = {
 }
 
 
-def extraer(pid):
+def extraer(pid, verbose=False):
     """Datos de scheduling de un proceso, o None si murió."""
     campos = procfs.leer_stat(pid)
     if campos is None:

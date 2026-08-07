@@ -136,7 +136,7 @@ class Monitor:
                 f"an_{nombre}",
                 analizador_base.correr,
                 (nombre, extraer, self.snapshot, self.colas[nombre],
-                 self.intervalos[nombre], self.parar, por_pid),
+                 self.intervalos[nombre], self.parar, por_pid, self.verbose),
             )
 
         # El agregador recibe TODAS las colas: es el único consumidor.

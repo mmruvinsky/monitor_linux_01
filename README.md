@@ -64,7 +64,7 @@ q                     salir limpiamente
 | `SIGINT` / `SIGTERM` | shutdown ordenado de los 10 hijos |
 | `SIGHUP` | recarga `config.json` en caliente |
 | `SIGUSR1` | vuelca el snapshot a `dump_<timestamp>.json` |
-| `SIGUSR2` | toggle de modo verbose |
+| `SIGUSR2` | toggle de modo verbose: sube los topes de FDs y threads por proceso |
 | `SIGWINCH` | repintado (la TUI ya se adapta sola) |
 
 ---
@@ -436,7 +436,7 @@ parar y el shutdown se sentiría colgado.
 | `SIGINT` / `SIGTERM` | nº de señal | la secuencia de shutdown de §4.3 |
 | `SIGHUP` | nº de señal | `config.cargar()` y actualizar los `Value` de intervalos |
 | `SIGUSR1` | nº de señal | `json.dump(dict(snapshot))` a `dump_<ts>.json` |
-| `SIGUSR2` | nº de señal | togglear el `Value('b')` de verbose |
+| `SIGUSR2` | nº de señal | togglear el `Value('b')` de verbose, que los 7 analizadores releen en cada vuelta |
 | `SIGWINCH` | nº de señal | loguear (la TUI ya se adapta sola) |
 
 `SIGHUP` verificado en vivo: editando `config.json` y mandando la señal, un
@@ -779,9 +779,11 @@ bloquearse en varias a la vez.
 - **`SIGWINCH`**: el handler está registrado y se loguea, pero no fuerza un
   repintado inmediato. En la práctica no se nota porque `rich` consulta el
   tamaño de la terminal en cada frame y el display redibuja a 8 fps.
-- **Modo verbose (`SIGUSR2`)**: el flag existe, se togglea y se comparte por
-  `Value('b')`, pero **todavía no está cableado** a los topes de FDs y threads.
-  Hoy cambiar el verbose no cambia lo que se ve.
+- **Modo verbose (`SIGUSR2`)**: sube los topes de FDs (32 → 256) y de threads
+  (64 → 512), pero **sigue habiendo un tope**. En este sistema el proceso con
+  más descriptores tiene 483, así que ni en verbose se ve la lista completa. No
+  se sube más porque el costo es directo sobre el peso del snapshot (§6.1):
+  medido, activar verbose lo llevó de 2.70 MB a 3.13 MB.
 - **Reutilización de PID**: se detecta comparando `starttime`, pero solo en las
   dimensiones `resumen` y `threads`, que son las que calculan deltas. Las demás
   no lo necesitan.
@@ -790,9 +792,10 @@ bloquearse en varias a la vez.
   `SIGINT` por el grupo de procesos antes de que el padre ordene el shutdown, el
   snapshot puede volverse inaccesible durante la salida. En la práctica no se
   observó, porque el shutdown tarda ~0.2 s.
-- **Sin tests automatizados** de los analizadores ni del agregador. `procfs.py`
-  es el único módulo diseñado para ser testeable en aislamiento; los tests
-  quedaron pendientes.
+- **Los tests cubren `procfs.py` únicamente** (51 casos, §7.6). Los analizadores,
+  el agregador y el display no tienen tests: hacerlos requeriría levantar
+  procesos y primitivas de `multiprocessing`, o inyectar dobles en lugares donde
+  hoy hay dependencias directas. Es la deuda técnica más clara del proyecto.
 
 ---
 
@@ -918,10 +921,46 @@ ps -eo pid,stat,comm | awk '$2 ~ /Z/'
 
 ### 7.6 Tests
 
+**51 tests, todos sobre `procfs.py`.** Es el único módulo sin concurrencia y por
+lo tanto el único testeable de forma determinista.
+
+La clave metodológica es que **no se testea contra `/proc` real**: `/proc` cambia
+entre ejecuciones —los procesos nacen y mueren, los contadores suben— así que un
+test contra él pasaría o fallaría según el momento. Se le pasan **strings de
+muestra** y se afirma exactamente qué tiene que salir.
+
+Los casos no son arbitrarios: cada uno corresponde a una trampa real que rompió
+el parseo durante el desarrollo.
+
+| Grupo | Qué cubre |
+|---|---|
+| `TestLeerStat` | `comm` con espacios y con paréntesis; incluye un test que **documenta el bug** que produciría un `split()` ingenuo |
+| `TestLeerStatus` | `Uid` con 4 valores; valores con unidad (`4352 kB`); valores con `-` |
+| `TestDecodificarMascara` | el desfasaje bit *i* → señal *i+1*; SIGTERM en el bit 14 |
+| `TestMaps` | agrupación en text/heap/stack/shared; rutas con espacios |
+| `TestCmdline` | separación por bytes nulos; kernel thread con cmdline vacío |
+| `TestClasificarFd` | socket / pipe / anon_inode / tty / memfd |
+| `TestPorcentajeCpu` | el cálculo por delta; división por cero cuando no hay muestra previa |
+| `TestMeminfo` | que `usada` use `MemAvailable` y **no** `MemFree` |
+| `TestSistemaReal` | propiedades que siempre valen (TID principal == PID, etc.), nunca valores exactos |
+
+**Cómo correrlos.** En muchas distribuciones modernas `pip install` está
+bloqueado a nivel del sistema (PEP 668), así que la forma más simple es un
+contenedor descartable:
+
 ```bash
+docker run --rm --pid=host -v "$PWD":/w -w /w python:3.13-slim \
+  sh -c "pip install -q pytest rich && python -m pytest tests -q"
+```
+
+Con un entorno virtual:
+
+```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt -r requirements-dev.txt
 python3 -m pytest tests/ -v
 ```
 
-Los tests apuntan a `procfs.py`, que es el único módulo sin concurrencia y por
-lo tanto el único testeable de forma determinista: se le pasan strings de
-muestra en vez de leer `/proc` real, que cambia entre ejecuciones.
+> `--pid=host` en la variante Docker no es decorativo: la clase
+> `TestSistemaReal` verifica propiedades contra procesos reales, y en un PID
+> namespace aislado el contenedor solo se ve a sí mismo.

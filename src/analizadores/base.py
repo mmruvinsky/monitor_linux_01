@@ -62,14 +62,15 @@ def dormir_interrumpible(parar, segundos):
         parar.wait(timeout=segundos)
 
 
-def correr(nombre, extraer, snapshot, cola, intervalo, parar, por_pid=True):
+def correr(nombre, extraer, snapshot, cola, intervalo, parar, por_pid=True,
+           verbose=None):
     """
     Loop principal de un analizador. Corre en su propio proceso.
 
     Parámetros:
       nombre   : str, la dimensión ("resumen", "memoria", ...)
-      extraer  : callable. Si por_pid=True recibe un pid y devuelve dict|None.
-                 Si por_pid=False no recibe nada y devuelve el dict completo.
+      extraer  : callable con firma extraer(pid, verbose) si por_pid=True, o
+                 extraer(verbose) si por_pid=False. Devuelve dict|None.
       snapshot : DictProxy. SOLO SE LEE de acá ("pids"). Nunca se escribe:
                  el único escritor del snapshot es el agregador.
       cola     : Queue propia de este analizador.
@@ -77,11 +78,21 @@ def correr(nombre, extraer, snapshot, cola, intervalo, parar, por_pid=True):
       parar    : Event de shutdown.
       por_pid  : False para el analizador "sistema", que lee archivos globales
                  y no itera sobre procesos.
+      verbose  : Value('b') compartido, toggleado por SIGUSR2 desde el padre.
+                 Todos los analizadores lo reciben aunque solo 'fds' y
+                 'threads' lo usen: mantener la firma uniforme evita tener
+                 que ramificar el cableado en main.py.
     """
     senales.preparar_hijo()
 
     while not parar.is_set():
         t0 = time.monotonic()
+
+        # Se lee UNA vez por vuelta, no una vez por proceso: son ~490
+        # lecturas de memoria compartida que no aportan nada, y además así
+        # toda la muestra queda coherente (no puede quedar mitad verbose y
+        # mitad no si el usuario aprieta SIGUSR2 a mitad del recorrido).
+        detallado = bool(verbose.value) if verbose is not None else False
 
         if por_pid:
             # Lectura del canal 2. Devuelve una COPIA de la lista: el
@@ -90,14 +101,14 @@ def correr(nombre, extraer, snapshot, cola, intervalo, parar, por_pid=True):
             pids = snapshot.get("pids", [])
             datos = {}
             for pid in pids:
-                d = extraer(pid)
+                d = extraer(pid, detallado)
                 # None = el proceso murió entre que el recolector lo listó y
                 # que llegamos acá, o no tenemos permisos. Es el caso normal,
                 # no un error: simplemente no aparece en esta muestra.
                 if d is not None:
                     datos[pid] = d
         else:
-            datos = extraer()
+            datos = extraer(detallado)
 
         # Canal 3: muestra CRUDA al agregador. Ojo con lo que NO va acá:
         # no hay ningún porcentaje calculado. Los porcentajes necesitan la

@@ -40,7 +40,7 @@ CAMPOS = {
 }
 
 
-def extraer(pid):
+def extraer(pid, verbose=False):
     """Máscaras de señales decodificadas, o None si el proceso murió."""
     status = procfs.leer_status(pid)
     if status is None:
