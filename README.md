@@ -964,3 +964,78 @@ python3 -m pytest tests/ -v
 > `--pid=host` en la variante Docker no es decorativo: la clase
 > `TestSistemaReal` verifica propiedades contra procesos reales, y en un PID
 > namespace aislado el contenedor solo se ve a sí mismo.
+
+---
+
+## 8. Capturas
+
+Las capturas **no son screenshots sacadas a mano**: se generan con
+`docs/generar_capturas.py`, que levanta el monitor, le manda `SIGUSR1` para
+obtener un dump real y renderiza cada vista con el código de `display.py`,
+exportando a SVG. Se pueden regenerar y siempre corresponden al código actual:
+
+```bash
+python3 docs/generar_capturas.py
+```
+
+### Vista 1 — Resumen (`1` / `r`)
+
+Lista de procesos ordenable por CPU%, RSS o PID, con estado coloreado y
+detalle del proceso seleccionado o pineado.
+
+![Resumen](docs/img/1-resumen.svg)
+
+### Vista 2 — Memoria (`2` / `m`)
+
+Campos `Vm*` de `status`, page faults minor/major, y los segmentos agrupados
+desde `/proc/<pid>/maps`: text, rodata, data, anon, heap, stack, shared.
+
+![Memoria](docs/img/2-memoria.svg)
+
+### Vista 3 — File descriptors (`3` / `f`)
+
+FDs abiertos con su destino real. Los `pipe:[N]` y `socket:[N]` muestran el
+inode del objeto del kernel: dos procesos con el mismo número están conectados.
+
+![File descriptors](docs/img/3-fds.svg)
+
+### Vista 4 — Threads / LWPs (`4` / `t`)
+
+Un renglón por task de `/proc/<pid>/task/`, con CPU% propio y context switches.
+El thread principal se marca porque su `TID == PID`.
+
+![Threads](docs/img/4-threads.svg)
+
+### Vista 5 — Señales (`5` / `s`)
+
+Las máscaras `SigBlk`, `SigIgn`, `SigCgt`, `SigPnd` y `ShdPnd` decodificadas de
+hexadecimal a nombres, con el valor crudo al lado para poder verificarlo contra
+`/proc` a mano.
+
+![Señales](docs/img/5-senales.svg)
+
+### Vista 6 — Scheduling (`6` / `p`)
+
+Nice, priority, policy, RT priority, afinidad de CPU, PGID/SID y los context
+switches voluntarios vs involuntarios, con el perfil (I/O-bound o CPU-bound)
+derivado de la proporción entre ambos.
+
+![Scheduling](docs/img/6-scheduling.svg)
+
+### Vista 7 — Sistema global (`7` / `g`)
+
+CPU global por delta, memoria, load average contra la cantidad de cores, boot
+time, uptime y los top 3 por CPU y por RSS.
+
+![Sistema](docs/img/7-sistema.svg)
+
+### Ayuda (`h` / `?`)
+
+![Ayuda](docs/img/8-ayuda.svg)
+
+---
+
+## 9. Lo que aprendí
+
+> **Pendiente de escribir.** Sección personal: 2-3 párrafos sobre lo que
+> descubrí haciendo el TP.
