@@ -79,6 +79,7 @@ class Display:
         self.filas = []               # última lista renderizada
         self.diag_teclado = "?"       # de dónde salió el fd del teclado
         self.teclas_recibidas = 0     # contador, para diagnosticar
+        self.inicio = time.monotonic()
 
     # ==================================================================
     # Entrada de teclado
@@ -239,6 +240,8 @@ class Display:
             self.filtro_cmd, self.filtro_usr, self.mostrar_ayuda,
             self.modo_entrada, self.buffer_entrada, self.mensaje,
             self.teclas_recibidas,
+            # para que el aviso de "sin teclas" aparezca al cruzar los 8 s
+            time.monotonic() - self.inicio > 8,
         )
 
     def render(self, alto=46):
@@ -641,6 +644,34 @@ class Display:
 
     # ------------------------------------------------------------------
 
+    def _estado_teclado(self):
+        """
+        Diagnóstico del teclado para el pie de pantalla.
+
+        El caso raro que hay que explicar: `docker compose up` NO reenvía el
+        stdin del host al contenedor, aunque tty y stdin_open estén en true.
+        Attachea la salida pero no la entrada, y no existe flag para
+        cambiarlo. Resultado: la TUI se dibuja perfecto y ninguna tecla
+        responde, que parece un bug del programa y no lo es.
+
+        Se detecta así: el proceso SÍ consiguió una terminal (o sea el fd está
+        bien) pero pasaron varios segundos sin que llegara una sola tecla.
+        No es prueba concluyente —puede ser alguien mirando sin tocar nada—
+        por eso el mensaje es una sugerencia y no una afirmación.
+        """
+        if self.teclas_recibidas > 0:
+            return f"[green]teclado ok ({self.teclas_recibidas})[/]"
+
+        if self.diag_teclado.startswith(("fd heredado", "/dev/tty", "dup")):
+            espera = time.monotonic() - self.inicio
+            if espera > 8:
+                return ("[bold yellow]sin teclas: ¿usaste `docker compose up`? "
+                        "no reenvía el teclado → "
+                        "`docker compose run --rm --build monitor`[/]")
+            return "[dim]esperando teclas...[/]"
+
+        return f"[bold red]sin teclado: {self.diag_teclado}[/]"
+
     def pie(self):
         if self.modo_entrada:
             etiqueta = "filtrar comando" if self.modo_entrada == "cmd" else "filtrar usuario"
@@ -662,10 +693,7 @@ class Display:
             if self.verbose is not None and self.verbose.value:
                 filtros.append("[bold yellow]VERBOSE[/]")
             extra = ("   " + "  ".join(filtros)) if filtros else ""
-            teclado_ok = self.teclas_recibidas > 0
-            estado_teclado = (
-                f"[green]teclado ok ({self.teclas_recibidas})[/]" if teclado_ok
-                else f"[yellow]teclado: {self.diag_teclado}[/]")
+            estado_teclado = self._estado_teclado()
             cuerpo = Text.from_markup(
                 "".join(tabs) + extra
                 + f"\n[dim]↑↓ navegar · Enter pin · / cmd · u user · c orden · "

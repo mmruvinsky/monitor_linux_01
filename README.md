@@ -804,10 +804,32 @@ bloquearse en varias a la vez.
 ### 7.1 Con Docker (forma recomendada)
 
 ```bash
-docker compose up --build
+docker compose run --rm --build monitor
 ```
 
 Un solo comando. Para salir: `q` dentro de la TUI, o `Ctrl+C`.
+
+> #### Por qué `run` y no `up`
+>
+> **`docker compose up` NO reenvía el teclado al contenedor**, aunque
+> `tty: true` y `stdin_open: true` estén configurados. `up` attachea la salida
+> de los contenedores, no la entrada, y no existe ninguna opción para
+> cambiarlo. El resultado es engañoso: la TUI se dibuja perfecto y ninguna
+> tecla responde, lo que parece un bug del programa.
+>
+> Comprobado lanzando ambos bajo una pty y mandando teclas:
+>
+> | comando | dibuja la TUI | responde teclas |
+> |---|---|---|
+> | `docker compose up` | sí | **no** |
+> | `docker compose run --rm --build monitor` | sí | **sí** |
+>
+> `docker compose run` sí conecta stdin de forma interactiva, y acepta
+> `--build`, así que sigue siendo un único comando.
+>
+> Si igualmente se corre con `up`, la propia TUI lo detecta: después de 8
+> segundos sin recibir una tecla, muestra el aviso en el pie de pantalla con
+> el comando correcto.
 
 **La línea clave del `docker-compose.yml` es `pid: "host"`.** Un contenedor tiene
 por defecto su propio **PID namespace**: un espacio de numeración de procesos

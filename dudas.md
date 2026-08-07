@@ -115,6 +115,32 @@ tratando la lectura vacía como EOF en vez de `continue`.
 > evitar que varios hijos peleen por leer la misma terminal, pero no encontré
 > la justificación escrita en la documentación.
 
+### `docker compose up` no manda el teclado al contenedor
+
+Después de arreglar lo de `multiprocessing` y stdin, el teclado seguía sin
+responder — pero solo en Docker. En la terminal directa andaba.
+
+Corrí el diagnóstico en mi terminal (Tilix) y las dos vías leían teclas sin
+problema: 45 teclas por `/dev/tty`. O sea, el mecanismo estaba bien.
+
+La causa: **`docker compose up` attachea la salida de los contenedores pero no
+la entrada**, aunque `tty: true` y `stdin_open: true` estén puestos. No hay
+flag para cambiarlo. Medido lanzando ambos bajo una pty y mandando teclas:
+
+| comando | dibuja | responde teclas |
+|---|---|---|
+| `docker compose up` | sí | **no** |
+| `docker compose run --rm --build monitor` | sí | **sí** |
+
+Es especialmente confuso porque la TUI se ve perfecta: parece un bug del
+programa cuando en realidad es el transporte de stdin.
+
+> **Duda que me queda:** la consigna pide explícitamente
+> `docker compose up --build` como comando único. ¿Se puede hacer que `up`
+> sea interactivo de alguna forma que no encontré, o corresponde documentar
+> que para una TUI hay que usar `run`? Lo dejé documentado y además la TUI
+> avisa sola si detecta que no llegan teclas.
+
 ### La TUI titilaba constantemente
 
 Dos causas sumadas:
