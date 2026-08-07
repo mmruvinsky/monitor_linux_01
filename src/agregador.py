@@ -60,6 +60,12 @@ class Agregador:
         # %CPU calculado por PID, para poder derivar el top 3 y para que la
         # vista Threads lo reutilice.
         self.cpu_por_pid = {}
+        # Contador que se incrementa en cada escritura. Le permite al display
+        # saber si hay algo nuevo leyendo UNA sola clave, en vez de comparar
+        # los 7 timestamps (7 round-trips por frame contra el servidor del
+        # Manager). Sin esto, la TUI repinta la pantalla completa varias veces
+        # por segundo aunque no haya cambiado nada, y eso se ve como titileo.
+        self.version = 0
 
     # ------------------------------------------------------------------
     # Despacho
@@ -92,6 +98,8 @@ class Agregador:
         """
         self.snapshot[dimension] = datos
         self.snapshot[f"{dimension}_ts"] = ts
+        self.version += 1
+        self.snapshot["version"] = self.version
 
     # ------------------------------------------------------------------
     # Resumen: acá se calcula el %CPU por proceso

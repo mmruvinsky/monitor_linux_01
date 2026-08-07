@@ -17,7 +17,7 @@ se comparte con nadie: es memoria privada de este proceso.
 import time
 
 from rich.align import Align
-from rich.console import Group
+from rich.console import Console, Group
 from rich.layout import Layout
 from rich.live import Live
 from rich.panel import Panel
@@ -224,16 +224,45 @@ class Display:
     # Render
     # ==================================================================
 
-    def render(self):
-        layout = Layout()
-        layout.split_column(
-            Layout(self.cabecera(), size=5),
-            Layout(self.tabla_procesos(), name="lista"),
-            Layout(self.detalle(), name="detalle", size=16),
-            Layout(self.pie(), size=4),
+    def firma(self):
+        """
+        Huella barata de todo lo que se dibuja. Si no cambió, no hace falta
+        repintar. `version` la incrementa el agregador en cada escritura, así
+        que alcanza UNA lectura del snapshot en vez de comparar los 7
+        timestamps (que serían 7 round-trips por frame).
+        """
+        return (
+            self.snapshot.get("version"),
+            self.vista, self.seleccion, self.pin, self.orden,
+            self.filtro_cmd, self.filtro_usr, self.mostrar_ayuda,
+            self.modo_entrada, self.buffer_entrada, self.mensaje,
         )
+
+    def render(self, alto=46):
+        """
+        Arma la pantalla repartiendo el alto REAL de la terminal.
+
+        Antes las tres franjas tenían tamaño fijo (5 + 16 + 4 = 25 líneas más
+        la lista). En una terminal de 30 filas eso no entra: el contenido
+        desborda, la pantalla alternativa scrollea y se ve como titileo. Acá
+        el detalle se encoge y la lista se queda con lo que sobra.
+        """
         if self.mostrar_ayuda:
             return self.ayuda()
+
+        alto_cabecera, alto_pie = 5, 4
+        alto_detalle = max(8, min(16, alto // 3))
+        alto_lista = max(4, alto - alto_cabecera - alto_pie - alto_detalle)
+        # -4: los dos bordes del panel, el título y la fila de encabezados.
+        self.filas_visibles = max(1, alto_lista - 4)
+
+        layout = Layout()
+        layout.split_column(
+            Layout(self.cabecera(), size=alto_cabecera),
+            Layout(self.tabla_procesos(), size=alto_lista),
+            Layout(self.detalle(), size=alto_detalle),
+            Layout(self.pie(), size=alto_pie),
+        )
         return layout
 
     # ------------------------------------------------------------------
@@ -309,9 +338,11 @@ class Display:
         t.add_column("COMANDO", overflow="ellipsis", no_wrap=True, ratio=1)
 
         # Ventana visible alrededor de la selección: no tiene sentido mandarle
-        # 460 filas a rich cuando entran 20 en pantalla.
-        alto = 20
-        inicio = max(0, self.seleccion - alto // 2)
+        # 460 filas a rich cuando entran 20 en pantalla. La cantidad la calcula
+        # render() según el alto real de la terminal.
+        alto = getattr(self, "filas_visibles", 18)
+        inicio = max(0, min(self.seleccion - alto // 2,
+                            max(0, len(self.filas) - alto)))
         visibles = self.filas[inicio:inicio + alto]
 
         for i, f in enumerate(visibles, start=inicio):
@@ -672,13 +703,26 @@ def correr(snapshot, intervalos, verbose, parar, cfg):
     """Punto de entrada del proceso display."""
     senales.preparar_hijo()
     ui = Display(snapshot, intervalos, verbose, parar, cfg)
+    consola = Console()
 
-    # screen=True usa la PANTALLA ALTERNATIVA de la terminal (el mismo truco
-    # de vim o less): al salir, el contenido previo de la terminal vuelve
-    # intacto en vez de quedar el monitor pegado en el scrollback.
-    with Teclado() as teclado, Live(ui.render(), screen=True,
-                                    refresh_per_second=8,
-                                    transient=False) as live:
+    # Dos decisiones sobre Live que son la diferencia entre una pantalla
+    # estable y una que titila:
+    #
+    # screen=True       usa la PANTALLA ALTERNATIVA (el truco de vim o less):
+    #                   al salir, la terminal vuelve intacta.
+    #
+    # auto_refresh=False Live trae su propio thread que repinta N veces por
+    #                   segundo. Si además nosotros llamamos a update(), hay
+    #                   DOS repintados compitiendo sobre la misma pantalla y
+    #                   se ve el parpadeo. Con auto_refresh=False el único que
+    #                   dibuja es este loop, cuando decide que hace falta.
+    with Teclado() as teclado, Live(ui.render(consola.size.height),
+                                   console=consola, screen=True,
+                                   auto_refresh=False,
+                                   transient=False) as live:
+        firma_anterior = None
+        ultimo_pintado = 0.0
+
         while not parar.is_set():
             teclas = teclado.leer_todas()
             if teclas and ui.mostrar_ayuda:
@@ -687,13 +731,23 @@ def correr(snapshot, intervalos, verbose, parar, cfg):
             for tecla in teclas:
                 ui.procesar(tecla)
 
-            try:
-                live.update(ui.render())
-            except Exception as e:
-                # Un error de render (terminal muy chica, dato inesperado) no
-                # debe matar la TUI: se muestra y se sigue.
-                live.update(Panel(Text(f"error de render: {e!r}", style="red")))
+            ahora = time.monotonic()
+            firma = ui.firma()
+            # Se repinta solo si: hubo una tecla, cambió el snapshot, o pasó
+            # más de un segundo (para que la antigüedad mostrada avance).
+            # Repintar contenido idéntico varias veces por segundo es
+            # exactamente lo que produce el titileo.
+            if teclas or firma != firma_anterior or ahora - ultimo_pintado > 1.0:
+                try:
+                    live.update(ui.render(consola.size.height), refresh=True)
+                except Exception as e:
+                    # Un error de render (terminal muy chica, dato inesperado)
+                    # no debe matar la TUI.
+                    live.update(Panel(Text(f"error de render: {e!r}",
+                                           style="red")), refresh=True)
+                firma_anterior = firma
+                ultimo_pintado = ahora
 
-            # ~8 fps. El display es independiente de los analizadores: dibuja
-            # lo último que haya en el snapshot, sin esperar a nadie.
-            parar.wait(timeout=0.125)
+            # 20 vueltas por segundo, pero solo para atender el teclado: así
+            # las teclas se sienten inmediatas sin repintar de gusto.
+            parar.wait(timeout=0.05)

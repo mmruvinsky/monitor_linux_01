@@ -85,6 +85,57 @@ buscando el último `)` con `rfind()`.
 Hay un test que documenta el bug además del fix, para que nadie "simplifique" el
 parseo más adelante.
 
+### El teclado no respondía ninguna tecla en la TUI
+
+La TUI dibujaba perfecto pero ninguna tecla hacía nada. La clase `Teclado`
+probada sola bajo una pty funcionaba (`['2','3','q','ARRIBA',...]`), así que el
+problema no era el parseo de teclas.
+
+La causa: **`multiprocessing.Process` cierra `stdin` en todos sus hijos.** En
+`BaseProcess._bootstrap` llama a `util._close_stdin()`, que cierra `sys.stdin` y
+lo reabre apuntando a `/dev/null`. El display es un proceso hijo, así que
+`sys.stdin.fileno()` devolvía el fd de `/dev/null`.
+
+Comprobado:
+
+```python
+def hijo(q): q.put(repr(sys.stdin))
+# el hijo reporta un objeto nuevo con fd 5 -> /dev/null
+```
+
+Y encima había un segundo bug encadenado: `select()` sobre un fd en EOF devuelve
+"listo" para siempre, así que el thread del teclado giraba a máxima velocidad
+quemando un core sin recibir nunca nada.
+
+Se resolvió abriendo `/dev/tty` —la terminal de control del proceso, que
+sobrevive al `fork()` y no depende de qué le hicieron a los fds estándar— y
+tratando la lectura vacía como EOF en vez de `continue`.
+
+> Duda que me quedó: ¿por qué `multiprocessing` hace eso? Supongo que para
+> evitar que varios hijos peleen por leer la misma terminal, pero no encontré
+> la justificación escrita en la documentación.
+
+### La TUI titilaba constantemente
+
+Dos causas sumadas:
+
+1. **Doble repintado.** `Live` levanta su propio thread que refresca N veces por
+   segundo, y nosotros además llamábamos a `live.update()` en el loop. Dos
+   escritores sobre la misma pantalla. Se arregla con `auto_refresh=False` y
+   refrescando solo desde el loop.
+2. **Repintar sin cambios.** Se repintaba la pantalla completa 8 veces por
+   segundo aunque el snapshot no se hubiera movido. Ahora se compara una firma
+   —que incluye un contador `version` que el agregador incrementa en cada
+   escritura— y solo se repinta si hubo tecla, cambió el dato, o pasó un
+   segundo.
+
+Medido bajo una pty de 150×44: pasó de ~24 repintados completos cada 3 s a ~3.
+
+Un tercer factor que también contribuía: las tres franjas del layout tenían
+tamaño fijo (5 + 16 + 4 = 25 líneas más la lista). En una terminal de menos de
+~30 filas el contenido desbordaba y la pantalla alternativa scrolleaba, lo que
+se ve igual que titileo. Ahora el alto se reparte según `console.size.height`.
+
 ### Rich aplastaba las columnas de la tabla
 
 La lista de procesos salía como `… USU… … COMANDO`. Rich mide el texto más largo

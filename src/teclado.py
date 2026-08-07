@@ -79,14 +79,61 @@ class Teclado:
         self.detener()
         return False
 
-    def iniciar(self):
+    def _abrir_terminal(self):
+        """
+        Consigue un fd de lectura sobre la terminal REAL.
+
+        ---------------------------------------------------------------
+        POR QUÉ NO SE PUEDE USAR sys.stdin ACÁ
+        ---------------------------------------------------------------
+        El display corre en un proceso hijo creado con
+        multiprocessing.Process, y multiprocessing CIERRA stdin en todos
+        sus hijos: en BaseProcess._bootstrap llama a util._close_stdin(),
+        que hace sys.stdin.close() y lo reabre apuntando a /dev/null.
+
+        Comprobable:
+
+            def hijo(q): q.put(os.readlink('/proc/self/fd/0'))
+            # el hijo reporta /dev/null, no la terminal
+
+        Consecuencia si se usa sys.stdin igual: select() sobre /dev/null
+        SIEMPRE dice que hay datos listos, read() devuelve b'' (EOF), y el
+        thread entra en busy-loop quemando un core entero sin recibir
+        jamás una tecla.
+
+        La solución es abrir /dev/tty, que es la terminal de control del
+        proceso: existe independientemente de qué le hayan hecho a los fds
+        estándar, y sobrevive al fork.
+        """
+        # 1. La terminal de control. Es el camino normal.
         try:
-            self._fd = sys.stdin.fileno()
+            return os.open("/dev/tty", os.O_RDONLY | os.O_NOCTTY)
+        except OSError:
+            pass
+        # 2. Fallback: el DESCRIPTOR 0 crudo, no sys.stdin.
+        #    _close_stdin() reemplaza el objeto sys.stdin por uno nuevo que
+        #    apunta a /dev/null, pero el fd 0 del proceso puede seguir siendo
+        #    la terminal. Por eso se chequea os.isatty(0) y no
+        #    sys.stdin.fileno(): usar sys.stdin acá es exactamente el bug que
+        #    hacía que el teclado no respondiera.
+        try:
+            if os.isatty(0):
+                return os.dup(0)
+        except OSError:
+            pass
+        return None
+
+    def iniciar(self):
+        self._fd = self._abrir_terminal()
+        if self._fd is None:
+            # Sin terminal (salida redirigida, docker sin -t). El monitor
+            # sigue funcionando, solo que sin teclado.
+            return
+        try:
             self._settings = termios.tcgetattr(self._fd)
             tty.setcbreak(self._fd)
         except (termios.error, ValueError, OSError):
-            # Sin tty (por ejemplo, salida redirigida a un archivo o docker
-            # sin -t). El monitor sigue funcionando, solo que sin teclado.
+            os.close(self._fd)
             self._fd = None
             return
 
@@ -98,12 +145,21 @@ class Teclado:
 
     def detener(self):
         self._parar.set()
-        if self._fd is not None and self._settings is not None:
-            # Restaurar SIEMPRE, o la terminal queda inutilizable.
+        if self._fd is None:
+            return
+        if self._settings is not None:
+            # Restaurar SIEMPRE, o la terminal queda sin echo y hay que
+            # escribir `reset` a ciegas.
             try:
                 termios.tcsetattr(self._fd, termios.TCSADRAIN, self._settings)
             except (termios.error, ValueError, OSError):
                 pass
+        # El fd es nuestro (lo abrimos con open o dup), así que lo cerramos.
+        try:
+            os.close(self._fd)
+        except OSError:
+            pass
+        self._fd = None
 
     def _loop(self):
         """
@@ -119,9 +175,15 @@ class Teclado:
             if not listos:
                 continue
             try:
-                ch = os.read(self._fd, 1).decode("utf-8", errors="ignore")
+                crudo = os.read(self._fd, 1)
             except (OSError, ValueError):
                 return
+            if not crudo:
+                # Lectura vacía = EOF. Si acá hiciéramos `continue`, el loop
+                # giraría a máxima velocidad quemando un core, porque select()
+                # sobre un fd en EOF devuelve "listo" para siempre.
+                return
+            ch = crudo.decode("utf-8", errors="ignore")
             if not ch:
                 continue
 
